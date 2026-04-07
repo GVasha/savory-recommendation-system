@@ -1,0 +1,22 @@
+# Food.com dataset files
+RAW_recipes.csv
+RAW_interactions.csv
+PP_recipes.csv
+PP_users.csv
+ingr_map.pkl
+interactions_test.csv
+interactions_train.csv
+interactions_validation.csv
+
+# Python cache artifacts
+__pycache__/
+*.pyc
+
+# Optional compressed variants
+RAW_recipes.csv.gz
+RAW_interactions.csv.gz
+PP_recipes.csv.gz
+PP_users.csv.gz
+recipes_visible_only.csv
+recipes_raw.csv
+recipes_flattened.csv
