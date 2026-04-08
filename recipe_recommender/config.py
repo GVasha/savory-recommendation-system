@@ -2,8 +2,9 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_RECIPES_PATH = PROJECT_ROOT / "recipes_visible_only.csv"
-DEFAULT_INTERACTIONS_PATH = PROJECT_ROOT / "interactions_train.csv"
+DATA_DIR = PROJECT_ROOT / "data"
+DEFAULT_RECIPES_PATH = DATA_DIR / "recipes_visible_only.csv"
+DEFAULT_INTERACTIONS_PATH = DATA_DIR / "interactions_train.csv"
 
 # Core model defaults
 DEFAULT_TOP_K = 10
