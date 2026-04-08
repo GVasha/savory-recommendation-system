@@ -344,6 +344,59 @@ class RecipeRecommender:
                     scores[self.id_to_idx[int(rid)]] = -np.inf
         return self._to_result(scores, top_k=top_k)
 
+    def recommend_switching(
+        self,
+        user_recipe_history: list[int],
+        user_id: int | None = None,
+        svd_model: Any = None,
+        min_cf_interactions: int = 3,
+        top_k: int = 10,
+        **constraints: Any,
+    ) -> tuple[pd.DataFrame, str]:
+        """
+        Switching hybrid: route to SVD-based CF when the user has sufficient catalog
+        interactions and a fitted SVD model is available; otherwise fall back to
+        content-based hybrid (liked-profile or popular for cold-start users).
+
+        Returns
+        -------
+        (DataFrame of recommendations, strategy_name)
+        """
+        self._check_fitted()
+        catalog_history = [int(r) for r in user_recipe_history if int(r) in self.id_to_idx]
+
+        can_use_cf = (
+            svd_model is not None
+            and user_id is not None
+            and len(catalog_history) >= min_cf_interactions
+            and int(user_id) in svd_model.user_map
+        )
+
+        if can_use_cf:
+            rec_ids = svd_model.recommend(
+                int(user_id), top_k=top_k * 2, exclude_ids=catalog_history
+            )
+            rec_ids = [r for r in rec_ids if r in self.id_to_idx][:top_k]
+            if rec_ids:
+                scores = np.full(len(self.df), -np.inf, dtype=np.float64)
+                u_idx = svd_model.user_map[int(user_id)]
+                pred = svd_model._pred_vector(u_idx)
+                for rid in rec_ids:
+                    i_svd = svd_model.item_map.get(int(rid))
+                    df_idx = self.id_to_idx[int(rid)]
+                    scores[df_idx] = float(pred[i_svd]) if i_svd is not None else 0.0
+                scores = self._apply_constraints(scores, **constraints)
+                return self._to_result(scores, top_k=top_k), "svd_cf"
+
+        if catalog_history:
+            return (
+                self.recommend_for_liked(
+                    catalog_history, top_k=top_k, model="hybrid", **constraints
+                ),
+                "content_hybrid",
+            )
+        return self.recommend_popular(top_k=top_k, **constraints), "popular_cold_start"
+
     def recommend_popular(
         self,
         top_k: int = 10,

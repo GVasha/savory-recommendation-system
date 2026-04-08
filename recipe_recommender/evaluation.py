@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -10,6 +10,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from .collaborative import ItemItemCollaborativeFiltering
 from .core import RecipeRecommender
+
+if TYPE_CHECKING:
+    from .svd_model import SVDRecommender
 
 
 def _ndcg_binary(hit_pos: int, top_k: int) -> float:
@@ -113,12 +116,30 @@ def evaluate_with_interactions(
     return _eval_strategy(users, user_histories, top_k, recommend_fn)
 
 
+def evaluate_ratings(
+    svd_model: "SVDRecommender",
+    test_path: str | Path,
+) -> dict[str, Any]:
+    """
+    Regression-style evaluation: RMSE and MAE on held-out explicit ratings.
+    test_path must be a CSV with columns user_id, id, rating.
+    """
+    path = Path(test_path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return {"status": "skipped (missing or empty test file)"}
+    test_df = pd.read_csv(path, encoding="utf-8-sig")
+    if not {"user_id", "id", "rating"}.issubset(test_df.columns):
+        return {"status": "skipped (missing required columns: user_id, id, rating)"}
+    return svd_model.rmse_mae(test_df)
+
+
 def evaluate_leave_one_out_comparison(
     recommender: RecipeRecommender,
     interactions_path: str | Path,
     top_k: int = 10,
     min_user_interactions: int = 2,
     random_seed: int = 42,
+    svd_model: "SVDRecommender | None" = None,
 ) -> dict[str, Any]:
     """
     Leave-last-item-out for each user: compare hybrid, TF-IDF, random, popularity,
@@ -196,6 +217,19 @@ def evaluate_leave_one_out_comparison(
         lambda _i, train, _t: ii_cf.recommend(train, top_k=top_k)["id"].tolist(),
     )
 
+    # SVD arm — only if a fitted SVDRecommender is passed
+    if svd_model is not None:
+        out["svd"] = _eval_strategy(
+            users,
+            user_histories,
+            top_k,
+            lambda i, train, _t: svd_model.recommend(
+                int(users[i]),
+                top_k=top_k,
+                exclude_ids=train,
+            ),
+        )
+
     out["n_users_evaluated"] = len(users)
     return out
 
@@ -242,11 +276,17 @@ def evaluate_cold_start_quality(
 def evaluate(
     recommender: RecipeRecommender,
     interactions_path: str | Path | None = None,
+    test_path: str | Path | None = None,
     top_k: int = 10,
     compare_baselines: bool = False,
+    svd_model: "SVDRecommender | None" = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {}
     out["cold_start"] = evaluate_cold_start_quality(recommender, top_k=top_k)
+
+    if svd_model is not None and test_path is not None:
+        out["rating_metrics"] = evaluate_ratings(svd_model, test_path)
+
     if interactions_path:
         path = Path(interactions_path)
         if path.is_file() and path.stat().st_size > 0:
@@ -255,6 +295,7 @@ def evaluate(
                     recommender,
                     interactions_path=path,
                     top_k=top_k,
+                    svd_model=svd_model,
                 )
             else:
                 try:
