@@ -38,11 +38,15 @@ class RecipeRecommender:
         w_numeric: float = DEFAULT_W_NUMERIC,
         w_category: float = DEFAULT_W_CATEGORY,
         use_bert: bool = True,
+        use_stem: bool = False,
     ) -> None:
         self.w_text = w_text
         self.w_numeric = w_numeric
         self.w_category = w_category
         self.use_bert = use_bert
+        self.use_stem = use_stem
+
+        self._sentence_transformer: Any = None
 
         self.df: pd.DataFrame | None = None
         self.id_to_idx: dict[int, int] = {}
@@ -83,7 +87,7 @@ class RecipeRecommender:
         else:
             out["cooking_minutes"] = np.nan
 
-        out["combined_text"] = build_combined_text(out)
+        out["combined_text"] = build_combined_text(out, use_stem=self.use_stem)
         out = out[out["combined_text"].str.len() > 0].copy()
         out = out.drop_duplicates(subset=["id"]).reset_index(drop=True)
 
@@ -92,12 +96,13 @@ class RecipeRecommender:
     def _build_bert(self, texts: list[str]) -> np.ndarray | None:
         if not self.use_bert:
             self.bert_source = "disabled"
+            self._sentence_transformer = None
             return None
         try:
             from sentence_transformers import SentenceTransformer
 
-            model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            emb = model.encode(
+            self._sentence_transformer = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+            emb = self._sentence_transformer.encode(
                 texts,
                 show_progress_bar=True,
                 batch_size=64,
@@ -108,6 +113,7 @@ class RecipeRecommender:
             return emb
         except Exception as exc:
             self.bert_source = f"fallback_tfidf ({type(exc).__name__})"
+            self._sentence_transformer = None
             return None
 
     def fit(self, recipes_path: str | Path = DEFAULT_RECIPES_PATH) -> "RecipeRecommender":
@@ -157,6 +163,30 @@ class RecipeRecommender:
         self.X_hybrid = _row_normalize(self.X_hybrid)
         return self
 
+    def _query_text_to_hybrid_vector(self, query_text: str) -> np.ndarray:
+        self._check_fitted()
+        q = normalize_text(query_text, use_stem=self.use_stem)
+        if self.X_bert is not None and self._sentence_transformer is not None:
+            t = self._sentence_transformer.encode(
+                [q],
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            ).astype(np.float32)
+        else:
+            q_vec = self.vectorizer.transform([q])
+            t = _row_normalize(q_vec.astype(np.float32).toarray())
+
+        n_num = self.X_numeric.shape[1]
+        n_cat = self.X_category.shape[1]
+        z_num = np.zeros((1, n_num), dtype=np.float32)
+        z_cat = np.zeros((1, n_cat), dtype=np.float32)
+        part1 = self.w_text * _row_normalize(t)
+        part2 = self.w_numeric * z_num
+        part3 = self.w_category * z_cat
+        q_h = np.hstack([part1, part2, part3])
+        q_h = _row_normalize(q_h)
+        return q_h.ravel().astype(np.float32)
+
     def _check_fitted(self) -> None:
         if self.df is None or self.vectorizer is None or self.X_hybrid is None:
             raise RuntimeError("Model is not fitted. Call fit() first.")
@@ -177,23 +207,22 @@ class RecipeRecommender:
 
         if query_text is None:
             raise ValueError("query_text is required for query scoring.")
-        q = normalize_text(query_text)
+        q = normalize_text(query_text, use_stem=self.use_stem)
 
         if model == "tfidf":
             q_vec = self.vectorizer.transform([q])
             return cosine_similarity(q_vec, self.X_tfidf).ravel()
         if model == "bert":
-            if self.X_bert is not None:
-                from sentence_transformers import SentenceTransformer
-
-                model_obj = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-                q_vec = model_obj.encode([q], convert_to_numpy=True, normalize_embeddings=True)
+            if self.X_bert is not None and self._sentence_transformer is not None:
+                q_vec = self._sentence_transformer.encode(
+                    [q], convert_to_numpy=True, normalize_embeddings=True
+                )
                 return (q_vec @ self.X_bert.T).ravel()
             q_vec = self.vectorizer.transform([q])
             return cosine_similarity(q_vec, self.X_tfidf).ravel()
         if model == "hybrid":
-            q_vec = self.vectorizer.transform([q])
-            return cosine_similarity(q_vec, self.X_tfidf).ravel()
+            q_h = self._query_text_to_hybrid_vector(query_text)
+            return (self.X_hybrid @ q_h).ravel()
 
         raise ValueError(f"Unsupported model: {model}")
 
@@ -231,12 +260,12 @@ class RecipeRecommender:
         text_field = self.df["combined_text"].fillna("")
         if include_terms:
             for t in include_terms:
-                token = normalize_text(t)
+                token = normalize_text(t, use_stem=self.use_stem)
                 if token:
                     mask &= text_field.str.contains(token, regex=False)
         if exclude_terms:
             for t in exclude_terms:
-                token = normalize_text(t)
+                token = normalize_text(t, use_stem=self.use_stem)
                 if token:
                     mask &= ~text_field.str.contains(token, regex=False)
 
@@ -283,7 +312,7 @@ class RecipeRecommender:
             profile = base[idxs].mean(axis=0)
             scores = (base @ profile).ravel()
         else:
-            profile = self.X_tfidf[idxs].mean(axis=0)
+            profile = np.asarray(self.X_tfidf[idxs].mean(axis=0))
             scores = cosine_similarity(profile, self.X_tfidf).ravel()
 
         for i in idxs:
@@ -297,3 +326,46 @@ class RecipeRecommender:
         query_text = pref_dict.pop("query_text")
         recs = self.recommend_for_query(query_text, top_k=top_k, model=model, **pref_dict)
         return recs, pref_dict
+
+    def recommend_random(
+        self,
+        top_k: int = 10,
+        random_state: int = 42,
+        exclude_recipe_ids: list[int] | None = None,
+        **constraints: Any,
+    ) -> pd.DataFrame:
+        self._check_fitted()
+        rng = np.random.default_rng(random_state)
+        scores = rng.random(len(self.df), dtype=np.float64)
+        scores = self._apply_constraints(scores, **constraints)
+        if exclude_recipe_ids:
+            for rid in exclude_recipe_ids:
+                if int(rid) in self.id_to_idx:
+                    scores[self.id_to_idx[int(rid)]] = -np.inf
+        return self._to_result(scores, top_k=top_k)
+
+    def recommend_popular(
+        self,
+        top_k: int = 10,
+        popularity_by_id: dict[int, float] | None = None,
+        exclude_recipe_ids: list[int] | None = None,
+        **constraints: Any,
+    ) -> pd.DataFrame:
+        """
+        Non-personalized popularity baseline. If popularity_by_id is None, uses a
+        uniform prior over the catalog (still respects hard constraints).
+        """
+        self._check_fitted()
+        if popularity_by_id is None:
+            scores = np.ones(len(self.df), dtype=np.float64)
+        else:
+            scores = np.array(
+                [float(popularity_by_id.get(int(rid), 0.0)) for rid in self.df["id"].tolist()],
+                dtype=np.float64,
+            )
+        scores = self._apply_constraints(scores, **constraints)
+        if exclude_recipe_ids:
+            for rid in exclude_recipe_ids:
+                if int(rid) in self.id_to_idx:
+                    scores[self.id_to_idx[int(rid)]] = -np.inf
+        return self._to_result(scores, top_k=top_k)

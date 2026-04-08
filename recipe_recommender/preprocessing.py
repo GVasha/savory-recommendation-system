@@ -91,18 +91,29 @@ def ingredient_groups_to_text(value: Any) -> str:
     return str(parsed)
 
 
-def normalize_text(text: Any) -> str:
+def normalize_text(text: Any, use_stem: bool = False) -> str:
     if text is None or (isinstance(text, float) and np.isnan(text)):
         return ""
     s = str(text).lower()
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    return s
+    words = s.split()
+    if use_stem and words:
+        try:
+            from nltk.stem import PorterStemmer
+
+            stemmer = PorterStemmer()
+            words = [stemmer.stem(w) for w in words if w]
+        except ImportError:
+            pass
+    return " ".join(words)
 
 
-def build_combined_text(df: pd.DataFrame) -> pd.Series:
+def build_combined_text(df: pd.DataFrame, use_stem: bool = False) -> pd.Series:
     name = df.get("name", pd.Series([""] * len(df), index=df.index)).fillna("")
     desc = df.get("description", pd.Series([""] * len(df), index=df.index)).fillna("")
     food_type = df.get("food_type", pd.Series([""] * len(df), index=df.index)).fillna("")
     ing = df.get("ingredient_text", pd.Series([""] * len(df), index=df.index)).fillna("")
-    return (name + " " + desc + " " + food_type + " " + ing).map(normalize_text)
+    return (name + " " + desc + " " + food_type + " " + ing).map(
+        lambda x: normalize_text(x, use_stem=use_stem)
+    )
